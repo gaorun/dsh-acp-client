@@ -64,6 +64,21 @@ function toolResultContent(update) {
 }
 
 /**
+ * 把 ACP 命令名规范成 DSH 合法命令名（`^[a-z][a-z0-9_-]*$`）。
+ * 例如 `opsx:apply` → `opsx-apply`、`Presentations:pptx` → `presentations-pptx`。
+ * 执行时仍用原始名发给外部 Agent。
+ */
+export function sanitizeCommandName(raw) {
+  const cleaned = String(raw ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  const name = /^[a-z]/.test(cleaned) ? cleaned : `cmd-${cleaned || 'tool'}`
+  return name.length > 64 ? name.slice(0, 64).replace(/-+$/g, '') : name
+}
+
+/**
  * 把一个已安装 agent 定义挂成一条 provider 路由的 adapter。
  * @param {object} agent 已安装 agent 定义（含 id/name/protocolVersion/distribution）
  * @param {object} ctx   Host context（用于 cwd 解析与生命周期）
@@ -319,14 +334,17 @@ export class AcpAdapter extends LlmAdapter {
 
     const disposers = []
     for (const command of commands) {
-      const name = command?.name
-      if (typeof name !== 'string' || name.length === 0) continue
+      const rawName = command?.name
+      if (typeof rawName !== 'string' || rawName.length === 0) continue
+      // DSH 命令名只允许 ^[a-z][a-z0-9_-]*$；ACP 名字可能含 `:` / 大写（如 opsx:apply），
+      // 用 DSH 合法名注册，执行时仍发回原始名字。
+      const name = sanitizeCommandName(rawName)
       try {
         disposers.push(commandService.register({
           name,
-          description: command.description ?? `Run /${name} on ${this.agent.name}`,
+          description: command.description ?? `Run /${rawName} on ${this.agent.name}`,
           ...(command.input?.hint ? { input: { hint: command.input.hint } } : {}),
-          handler: ({ agent, rawInput }) => this.runAgentCommand(agent, name, rawInput),
+          handler: ({ agent, rawInput }) => this.runAgentCommand(agent, rawName, rawInput),
         }))
       } catch {
         // 名称非法或与已有命令冲突时跳过该条，不阻断其余命令。
@@ -336,17 +354,17 @@ export class AcpAdapter extends LlmAdapter {
   }
 
   /**
-   * 执行一条 ACP 斜杠命令：把 `/name rawInput` 作为下一条用户消息投给 agent，
+   * 执行一条 ACP 斜杠命令：把 `/原始名 rawInput` 作为下一条用户消息投给 agent，
    * 由 agent-loop 转成 session/prompt 交给外部 Agent 执行。
    */
-  runAgentCommand(agent, name, rawInput) {
-    if (agent === undefined) return { kind: 'error', text: `/${name}: no receiving agent` }
-    const line = `/${name}${rawInput ? ` ${rawInput}` : ''}`
+  runAgentCommand(agent, originalName, rawInput) {
+    if (agent === undefined) return { kind: 'error', text: `/${originalName}: no receiving agent` }
+    const line = `/${originalName}${rawInput ? ` ${rawInput}` : ''}`
     try {
       agent.followup({ content: [{ type: 'text', text: line }], source: { kind: 'user' } })
-      return { kind: 'success', text: `已发送 /${name} 给 ${this.agent.name}` }
+      return { kind: 'success', text: `已发送 /${originalName} 给 ${this.agent.name}` }
     } catch (error) {
-      return { kind: 'error', text: `/${name}: ${error?.message ?? String(error)}` }
+      return { kind: 'error', text: `/${originalName}: ${error?.message ?? String(error)}` }
     }
   }
 

@@ -108,3 +108,27 @@ realTest('commands: real Qoder advertises slash commands end-to-end', { timeout:
   assert.ok(registered.length > 0, 'should register at least one command')
   assert.ok(registered.some((definition) => definition.name === 'goal'), 'Qoder should advertise /goal')
 })
+
+import { sanitizeCommandName } from '../src/adapter.mjs'
+
+test('commands: sanitizeCommandName maps ACP names to DSH-legal names', () => {
+  assert.equal(sanitizeCommandName('opsx:apply'), 'opsx-apply')
+  assert.equal(sanitizeCommandName('Presentations:pptx'), 'presentations-pptx')
+  assert.equal(sanitizeCommandName('sites:sites-build-agent-app'), 'sites-sites-build-agent-app')
+  assert.equal(sanitizeCommandName('goal'), 'goal')
+  assert.equal(sanitizeCommandName('9-lives'), 'cmd-9-lives')
+  assert.match(sanitizeCommandName('a'.repeat(100)), /^[a-z][a-z0-9_-]*$/)
+})
+
+test('commands: colon-named ACP command registers under a DSH name but sends the original', () => {
+  const adapter = new AcpAdapter(agentDef, undefined)
+  const { agent, registered, followed } = makeFakeAgent()
+  adapter.registerCommands(agent, [{ name: 'opsx:apply', description: 'Apply a change' }])
+
+  assert.equal(registered.length, 1)
+  assert.equal(registered[0].name, 'opsx-apply')
+
+  const result = registered[0].handler({ agent, rawInput: 'change-1' })
+  assert.equal(result.kind, 'success')
+  assert.deepEqual(followed[0].content, [{ type: 'text', text: '/opsx:apply change-1' }])
+})
