@@ -93,4 +93,59 @@ export async function fetchRegistry(url = DEFAULT_REGISTRY_URL, fetchImpl = fetc
 
 export const DEFAULT_REGISTRY_URL = 'https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json'
 
-export default { validateAgent, normalizeRegistryEntry, fetchRegistry, DEFAULT_REGISTRY_URL }
+/**
+ * 把「注册表条目」或「自定义 Agent 定义」规范化为内部 agent 定义。
+ * 自定义定义额外支持 distribution.command（直连命令字符串）。
+ * @param {object} input
+ * @param {'v1'|'v2'} [fallbackProtocolVersion]
+ */
+export function normalizeAgentDefinition(input, fallbackProtocolVersion = 'v1') {
+  const errors = []
+  if (!input || typeof input !== 'object') return { ok: false, errors: ['agent definition is not an object'] }
+
+  const id = input.id
+  if (typeof id !== 'string' || !ID_PATTERN.test(id)) errors.push(`id must match ${ID_PATTERN}`)
+  const name = input.name
+  if (typeof name !== 'string' || name.trim().length === 0) errors.push('name is required')
+
+  const dist = input.distribution
+  if (!dist || typeof dist !== 'object') {
+    errors.push('distribution is required')
+  } else {
+    const kinds = ['binary', 'npx', 'uvx', 'command'].filter((k) => dist[k] !== undefined)
+    if (kinds.length === 0) errors.push('distribution needs at least one of binary/npx/uvx/command')
+    if (dist.command !== undefined && (typeof dist.command !== 'string' || dist.command.trim().length === 0)) {
+      errors.push('distribution.command must be a non-empty string')
+    }
+    if (dist.npx !== undefined && (typeof dist.npx?.package !== 'string' || dist.npx.package.length === 0)) {
+      errors.push('distribution.npx.package is required')
+    }
+    if (dist.uvx !== undefined && (typeof dist.uvx?.package !== 'string' || dist.uvx.package.length === 0)) {
+      errors.push('distribution.uvx.package is required')
+    }
+    if (dist.binary !== undefined && (typeof dist.binary !== 'object' || dist.binary === null)) {
+      errors.push('distribution.binary must be an object')
+    }
+  }
+
+  if (errors.length > 0) return { ok: false, errors }
+
+  const protocolVersion =
+    input.protocolVersion === 'v2' ? 'v2' : input.protocolVersion === 'v1' ? 'v1' : fallbackProtocolVersion
+
+  return {
+    ok: true,
+    value: {
+      id: id.trim(),
+      name: name.trim(),
+      protocolVersion,
+      ...(typeof input.description === 'string' ? { description: input.description } : {}),
+      ...(typeof input.repository === 'string' ? { repository: input.repository } : {}),
+      ...(typeof input.license === 'string' ? { license: input.license } : {}),
+      ...(typeof input.icon === 'string' ? { icon: input.icon } : {}),
+      distribution: dist,
+    },
+  }
+}
+
+export default { validateAgent, normalizeRegistryEntry, fetchRegistry, normalizeAgentDefinition, DEFAULT_REGISTRY_URL }

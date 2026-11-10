@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 
 import { createMapperState, mapUpdate, stopReasonToFinish, CHUNK } from '../src/v1-mapping.mjs'
 import { platformTarget, candidateTargets, resolveLaunch } from '../src/launch.mjs'
-import { validateAgent, normalizeRegistryEntry } from '../src/registry.mjs'
+import { validateAgent, normalizeRegistryEntry, normalizeAgentDefinition } from '../src/registry.mjs'
 
 test('v1-mapping: agent text chunk maps to text-delta', () => {
   const state = createMapperState()
@@ -130,4 +130,33 @@ test('registry: normalize sets protocolVersion default v1', () => {
   assert.equal(r.value.id, 'qoder')
   assert.equal(r.value.distribution.npx.package, 'qoder')
   assert.equal(normalizeRegistryEntry(entry, 'v2').value.protocolVersion, 'v2')
+})
+
+test('registry: normalizeAgentDefinition accepts custom command distribution', () => {
+  const r = normalizeAgentDefinition({
+    id: 'my-agent', name: 'My Agent', protocolVersion: 'v1',
+    distribution: { command: '~/bin/agent --acp' },
+  })
+  assert.equal(r.ok, true)
+  assert.equal(r.value.id, 'my-agent')
+  assert.equal(r.value.distribution.command, '~/bin/agent --acp')
+  assert.equal(r.value.protocolVersion, 'v1')
+})
+
+test('registry: normalizeAgentDefinition rejects bad definitions', () => {
+  assert.equal(normalizeAgentDefinition(null).ok, false)
+  assert.equal(normalizeAgentDefinition({ id: 'Bad_ID', name: 'x', distribution: { command: 'a' } }).ok, false)
+  assert.equal(normalizeAgentDefinition({ id: 'ok', name: '', distribution: { command: 'a' } }).ok, false)
+  assert.equal(normalizeAgentDefinition({ id: 'ok', name: 'x', distribution: {} }).ok, false)
+  assert.equal(normalizeAgentDefinition({ id: 'ok', name: 'x', distribution: { command: '  ' } }).ok, false)
+})
+
+test('registry: normalizeAgentDefinition accepts registry-entry shapes', () => {
+  const entry = {
+    id: 'qoder', name: 'Qoder', version: '1.0.0', description: 'd',
+    distribution: { npx: { package: 'qoder', args: ['--acp'] } },
+  }
+  const r = normalizeAgentDefinition(entry)
+  assert.equal(r.ok, true)
+  assert.equal(r.value.distribution.npx.package, 'qoder')
 })
