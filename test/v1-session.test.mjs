@@ -52,7 +52,7 @@ test('v1-session: drives the SDK example agent end-to-end', { timeout: 30000 }, 
   const reasoning = chunks.filter((c) => c.type === CHUNK.reasoningDelta).map((c) => c.text).join('')
 
   assert.match(text, /help you/i, 'assistant text should be present')
-  assert.match(reasoning, /\[tool\]/, 'tool lifecycle should surface as reasoning')
+  assert.match(reasoning, /🔧/, 'tool lifecycle should surface as reasoning')
   assert.equal(session.stopReason, 'end_turn')
 
   const finish = stopReasonToFinish(session.stopReason)

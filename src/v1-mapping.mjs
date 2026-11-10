@@ -24,7 +24,7 @@ export const CHUNK = Object.freeze({
 
 /** 一次映射的推进状态：block 索引单调递增，文本与思考各占一个 block。 */
 export function createMapperState() {
-  return { textIndex: 0, reasoningIndex: 1, usage: undefined }
+  return { textIndex: 0, reasoningIndex: 1, usage: undefined, toolTitles: new Map() }
 }
 
 /** 判断一个 update 是否属于「应产生可见内容的 agent 文本块」。 */
@@ -62,7 +62,7 @@ export function mapUpdate(update, state) {
   }
 
   if (isToolLifecycle(update)) {
-    const rendered = renderToolLifecycle(update)
+    const rendered = renderToolLifecycle(update, state)
     if (rendered) chunks.push({ type: CHUNK.reasoningDelta, index: state.reasoningIndex, text: rendered })
     return chunks
   }
@@ -81,15 +81,62 @@ export function mapUpdate(update, state) {
   return chunks
 }
 
-/** 把 Agent 的工具活动渲染成一行可读的思考轨迹文本（v1 MVP）。 */
-function renderToolLifecycle(update) {
+/** 把 Agent 的工具活动渲染成多行思考轨迹（标题/状态/输入/位置/输出/差异）。 */
+function renderToolLifecycle(update, state) {
   const id = update.toolCallId ?? update.id ?? ''
-  const title = update.title ?? update.name ?? ''
-  const status = update.status ?? ''
-  const kind = update.kind ? ` (${update.kind})` : ''
-  if (!title && !id) return ''
-  const label = title || id
-  return `[tool] ${label}${kind}${status ? ` — ${status}` : ''}`
+  // tool_call 首次带 title；后续 tool_call_update 只带 toolCallId，用缓存的标题补全。
+  if (update.title !== undefined && id) state.toolTitles.set(id, update.title)
+  const title = update.title ?? state.toolTitles.get(id) ?? id
+  if (!title) return ''
+  const header = [`🔧 ${title}`, update.kind ? `(${update.kind})` : '', update.status ? `— ${update.status}` : '']
+    .filter(Boolean)
+    .join(' ')
+
+  const lines = [header]
+  if (update.rawInput !== undefined) lines.push(`  input: ${shortJson(update.rawInput)}`)
+  if (Array.isArray(update.locations) && update.locations.length > 0) {
+    const paths = update.locations.map((location) => location?.path).filter(Boolean)
+    if (paths.length > 0) lines.push(`  locations: ${paths.join(', ')}`)
+  }
+  const rendered = renderToolContent(update.content)
+  if (rendered.length > 0) {
+    for (const line of rendered) lines.push(`  ${line}`)
+  } else if (update.rawOutput !== undefined) {
+    lines.push(`  output: ${shortJson(update.rawOutput)}`)
+  }
+  return `${lines.join('\n')}\n`
+}
+
+/** ACP tool_call content → 可读行（text / diff / terminal）。 */
+function renderToolContent(content) {
+  if (!Array.isArray(content)) return []
+  const out = []
+  for (const item of content) {
+    if (item?.type === 'content' && item.content?.type === 'text') {
+      out.push(`output: ${truncate(item.content.text, 500)}`)
+    } else if (item?.type === 'diff') {
+      const oldLen = typeof item.oldText === 'string' ? item.oldText.length : 0
+      const newLen = typeof item.newText === 'string' ? item.newText.length : 0
+      out.push(`diff: ${item.path ?? '?'} (${oldLen === 0 ? 'add' : 'modify'}, ${oldLen}→${newLen} chars)`)
+    } else if (item?.type === 'terminal') {
+      out.push(`terminal: ${item.terminalId ?? '?'}`)
+    }
+  }
+  return out
+}
+
+/** 截断长文本，避免撑爆思考轨迹。 */
+function truncate(text, max) {
+  return text.length <= max ? text : `${text.slice(0, max)}…`
+}
+
+/** 把任意 JSON 值渲染成截断后的单行。 */
+function shortJson(value) {
+  try {
+    return truncate(JSON.stringify(value), 400)
+  } catch {
+    return '[unserializable]'
+  }
 }
 
 /** 把 ACP v1 的 usage 规范化成 DSH usage 块的最小形状。 */

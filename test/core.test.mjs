@@ -160,3 +160,30 @@ test('registry: normalizeAgentDefinition accepts registry-entry shapes', () => {
   assert.equal(r.ok, true)
   assert.equal(r.value.distribution.npx.package, 'qoder')
 })
+
+test('v1-mapping: tool details include input, locations, output, diff', () => {
+  const state = createMapperState()
+  const initial = mapUpdate({
+    sessionUpdate: 'tool_call',
+    toolCallId: 'c1',
+    title: 'Read',
+    kind: 'read',
+    status: 'in_progress',
+    rawInput: { path: '/project/README.md' },
+    locations: [{ path: '/project/README.md' }],
+  }, state)
+  assert.match(initial[0].text, /input:/)
+  assert.match(initial[0].text, /\/project\/README\.md/)
+
+  const done = mapUpdate({
+    sessionUpdate: 'tool_call_update',
+    toolCallId: 'c1',
+    status: 'completed',
+    content: [
+      { type: 'content', content: { type: 'text', text: '# My Project' } },
+      { type: 'diff', path: '/project/a.ts', oldText: 'a', newText: 'bb' },
+    ],
+  }, state)
+  assert.match(done[0].text, /# My Project/)
+  assert.match(done[0].text, /diff: \/project\/a\.ts/)
+})
