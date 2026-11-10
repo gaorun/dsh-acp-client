@@ -25,7 +25,7 @@ function makeFakeCtx() {
 
 test('host: Config schema has defaults', () => {
   assert.ok(Config)
-  assert.deepEqual(inject, ['llm', 'connection'])
+  assert.deepEqual(inject, ['llm', 'connection', 'commands'])
 })
 
 test('host: apply registers the four ACP fetch routes', () => {

@@ -51,6 +51,8 @@ export class AcpAdapter extends LlmAdapter {
     this._models = undefined
     /** @type {Promise<Array<object>>|undefined} 进行中的探测 */
     this._probe = undefined
+    /** @type {Map<string, {key:string, disposers:Array<() => void>}>} DSH agent → 已注册的 ACP 斜杠命令 */
+    this._commandState = new Map()
   }
 
   providerInfo() {
@@ -149,9 +151,13 @@ export class AcpAdapter extends LlmAdapter {
     signal?.addEventListener('abort', onAbort)
 
     const state = createMapperState()
+    const dshAgent = this.ctx?.get('agents')?.get(options?.sessionId)
     try {
       for await (const update of session.prompt(userText)) {
         if (signal?.aborted) break
+        if (update?.sessionUpdate === 'available_commands_update') {
+          this.registerCommands(dshAgent, update.availableCommands ?? [])
+        }
         for (const chunk of mapUpdate(update, state)) yield chunk
       }
       if (signal?.aborted) {
@@ -166,8 +172,58 @@ export class AcpAdapter extends LlmAdapter {
     }
   }
 
+  /**
+   * 把 ACP Agent 声明的斜杠命令注册为**该 DSH agent 作用域**的命令
+   * （agent.ctx.commands.register → scopeOf(agent.ctx) 生效，只对该 agent 可见）。
+   * 命令列表变化时先注销旧的再重注册。
+   * @param {object|undefined} dshAgent 接收命令的 DSH Agent
+   * @param {Array<object>} commands ACP availableCommands
+   */
+  registerCommands(dshAgent, commands) {
+    const scope = dshAgent?.ctx
+    if (scope?.commands === undefined) return
+    const key = JSON.stringify(commands)
+    const previous = this._commandState.get(scope)
+    if (previous?.key === key) return
+    if (previous !== undefined) for (const dispose of previous.disposers) dispose()
+
+    const disposers = []
+    for (const command of commands) {
+      const name = command?.name
+      if (typeof name !== 'string' || name.length === 0) continue
+      try {
+        disposers.push(scope.commands.register({
+          name,
+          description: command.description ?? `Run /${name} on ${this.agent.name}`,
+          ...(command.input?.hint ? { input: { hint: command.input.hint } } : {}),
+          handler: ({ agent, rawInput }) => this.runAgentCommand(agent, name, rawInput),
+        }))
+      } catch {
+        // 名称非法或与已有命令冲突时跳过该条，不阻断其余命令。
+      }
+    }
+    this._commandState.set(scope, { key, disposers })
+  }
+
+  /**
+   * 执行一条 ACP 斜杠命令：把 `/name rawInput` 作为下一条用户消息投给 agent，
+   * 由 agent-loop 转成 session/prompt 交给外部 Agent 执行。
+   */
+  runAgentCommand(agent, name, rawInput) {
+    if (agent === undefined) return { kind: 'error', text: `/${name}: no receiving agent` }
+    const line = `/${name}${rawInput ? ` ${rawInput}` : ''}`
+    try {
+      agent.followup({ content: [{ type: 'text', text: line }], source: { kind: 'user' } })
+      return { kind: 'success', text: `已发送 /${name} 给 ${this.agent.name}` }
+    } catch (error) {
+      return { kind: 'error', text: `/${name}: ${error?.message ?? String(error)}` }
+    }
+  }
+
   /** 关闭并清理本 adapter 持有的所有 ACP 会话与进程。 */
   async dispose() {
+    for (const state of this._commandState.values()) for (const dispose of state.disposers) dispose()
+    this._commandState.clear()
     const sessions = [...this.sessions.values()]
     this.sessions.clear()
     this._models = undefined
