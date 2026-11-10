@@ -1,6 +1,6 @@
 {
   "name": "@deepseek-ai/dsh-acp-client",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "ACP client adapter for DeepSeek Harness: drive external ACP agents (Qoder, Claude Code, Gemini CLI, …) as models, plus an ACP Registry settings page.",
   "type": "module",
