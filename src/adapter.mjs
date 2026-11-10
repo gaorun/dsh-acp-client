@@ -260,24 +260,28 @@ export class AcpAdapter extends LlmAdapter {
     if (session?.append === undefined) return false
     const callId = update?.toolCallId ?? update?.id
     if (typeof callId !== 'string' || callId.length === 0) return false
+    // tool/call 与 tool/result 的 data.turn/step 必须精确等于当前 open 的 turn/step，
+    // 否则会话日志在重放时被判为 corrupt。拿不到精确位置就回退思考轨迹文本，绝不瞎写。
+    const position = this.toolPosition(session)
+    if (position === undefined) return false
+    const { turn, step } = position
     try {
-      const turn = this.currentTurn(session)
       let record = this._toolCalls.get(callId)
       if (record === undefined) {
         const event = session.append('tool/call', {
           turn,
-          step: 0,
+          step,
           callId,
           name: update.title ?? update.kind ?? 'tool',
           arguments: safeJson(update.rawInput ?? {}),
         })
-        record = { seq: event.seq }
+        record = { seq: event.seq, turn, step }
         this._toolCalls.set(callId, record)
       }
       if (update.status === 'completed' || update.status === 'failed') {
         session.append('tool/result', {
-          turn,
-          step: 0,
+          turn: record.turn ?? turn,
+          step: record.step ?? step,
           message: createToolResultMessage({
             callId,
             content: toolResultContent(update),
@@ -294,13 +298,23 @@ export class AcpAdapter extends LlmAdapter {
     }
   }
 
-  /** 当前 turn（tool 事件的归属由事件 seq 决定，turn/step 仅作记录）。 */
-  currentTurn(session) {
+  /**
+   * 读取当前 open 的 turn/step。step 号从 `turnBoundary` 的 lastStepStartSeq 指向的
+   * step/start 事件里取；无法确定时返回 undefined（调用方回退文本）。
+   */
+  toolPosition(session) {
     try {
       const boundary = this.ctx?.get('agents')?.turnBoundaryOf?.(session)
-      return typeof boundary?.lastTurn === 'number' ? boundary.lastTurn : 0
+      if (boundary === undefined) return undefined
+      const turn = typeof boundary.lastTurn === 'number' ? boundary.lastTurn : undefined
+      if (turn === undefined) return undefined
+      const stepSeq = boundary.lastStepStartSeq
+      if (stepSeq === null || stepSeq === undefined || typeof session.eventAt !== 'function') return undefined
+      const startEvent = session.eventAt(stepSeq)
+      const step = startEvent?.data?.step
+      return typeof step === 'number' ? { turn, step } : undefined
     } catch {
-      return 0
+      return undefined
     }
   }
 
