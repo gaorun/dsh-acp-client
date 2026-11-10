@@ -47,13 +47,15 @@ node --test          # 19/19 通过（mapping / launch / registry / v1-session �
 - **接入点**：LLM adapter（`ctx.llm.registerAdapter`），provider 命名 `acp:<id>`。
 - **有状态桥**：DSH 的 `stream(messages)` 是无状态单次调用，而 ACP Agent 是整回合有状态；adapter 用 `options.sessionId → ACP 会话` 的 Map 桥接，只把「本轮新增用户文本」发成 `session/prompt`。
 - **语义映射**：`agent_message_chunk→text-delta`、`agent_thought_chunk→reasoning-delta`、`tool_call→reasoning`（v1 降级）、`usage_update→usage`、`stopReason→finish`。
+- **模型选择**：`listModels` 首次起一个短命 probe 会话读取 ACP `session/new.models.availableModels`（或 configOptions 的 model select）并缓存；`stream` 按 DSH 选中的 model id 调 `session/set_config_option` 切换外部 Agent 模型。已验证 Qoder CLI 返回 15 个模型。
 - **V1/V2**：`protocolVersion` 字段切换 `v1-session` / `v2-session`，上层（registry 页/下拉/轨迹/统计）不动。
 - **数据源澄清**：用户给的 `agent.schema.json` 是校验 manifest 的 JSON Schema；真正的列表是聚合的 `registry.json`（CDN `https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json`）。
 
-## 后续（按里程碑推进）
+## 里程碑
 
-1. **M2**：`src/v1-session.mjs` 用 SDK 落线 `client()/connectWith/buildSession`，接进 `lib/index.js`，装 bundle 验证「模型下拉框出现 Agent、可对话」。
-2. **M3**：`lib/client.js` 实现 registry 列表 + 安装 + 自定义表单。
-3. **M4**：`src/v2-session.mjs` 用 `@agentclientprotocol/sdk/experimental/v2`，切换 `protocolVersion`。
+1. **M2 ✅**：`src/v1-session.mjs` SDK 落线 `client()/connect/buildSession`，接进 `lib/index.js`；bundle 已装、Host 插件 `fiberPhase: active`；Qoder CLI 端到端冒烟通过。
+2. **M3 ✅**：`lib/client.js` 真正的 ACP Registry 设置页（Registry / 已安装 / 自定义 + 搜索 + 安装/卸载），Host 侧 `ctx.connection.fetch` 路由持久化到 `configEditor`。
+3. **模型选择 ✅**：外部 Agent 的模型进入模型下拉框，选中后通过 `session/set_config_option` 切换。
+4. **M4（待做）**：`src/v2-session.mjs` 用 `@agentclientprotocol/sdk/experimental/v2`，按 `protocolVersion` 切换。
 
 先例可复用：`my-repos/acp-v2v1-shim`（v2↔v1 逐方法映射，已验证 Qoder v1 / Delta v2 真实流量）；DSH 自带的 `dsh-acp` 服务器是反方向的 update↔语义映射参考。

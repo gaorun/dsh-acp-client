@@ -21,6 +21,12 @@ function defaultPermissionDecision(params) {
   return { outcome: { outcome: 'cancelled' } }
 }
 
+/** 从 session/configOptions 里找模型选择器（category 优先，其次 id）。 */
+export function findModelConfigOption(configOptions) {
+  if (!Array.isArray(configOptions)) return undefined
+  return configOptions.find((option) => option?.category === 'model') ?? configOptions.find((option) => option?.id === 'model')
+}
+
 export class V1Session {
   /**
    * @param {object} init
@@ -84,6 +90,58 @@ export class V1Session {
 
   get sessionId() {
     return this.session.sessionId
+  }
+
+  /**
+   * 会话声明的可用模型。优先 classic `models.availableModels`，回退到 configOptions 里
+   * category/id 为 `model` 的 select 选项。
+   * @returns {Array<{id: string, name: string, description?: string}>}
+   */
+  get models() {
+    const response = this.session.newSessionResponse
+    const classic = response?.models?.availableModels
+    if (Array.isArray(classic) && classic.length > 0) {
+      return classic.map((model) => ({
+        id: model.modelId,
+        name: model.name ?? model.modelId,
+        ...(model.description ? { description: model.description } : {}),
+      }))
+    }
+    const option = findModelConfigOption(response?.configOptions)
+    return (option?.options ?? []).map((value) => ({
+      id: value.value,
+      name: value.name ?? value.value,
+      ...(value.description ? { description: value.description } : {}),
+    }))
+  }
+
+  /** 当前模型 id。 */
+  get currentModelId() {
+    if (this._modelId !== undefined) return this._modelId
+    const response = this.session.newSessionResponse
+    return response?.models?.currentModelId ?? findModelConfigOption(response?.configOptions)?.currentValue
+  }
+
+  /**
+   * 选模型：v1 `session/set_config_option`（configId 取 model 选项的 id）。
+   * best-effort：agent 不支持时记录错误但不阻断回合。
+   * @param {string} modelId
+   */
+  async setModel(modelId) {
+    if (!modelId || modelId === this.currentModelId) return
+    const option = findModelConfigOption(this.session.newSessionResponse?.configOptions)
+    try {
+      const result = await this.connection.agent.request(acp.methods.agent.session.setConfigOption, {
+        sessionId: this.sessionId,
+        configId: option?.id ?? 'model',
+        value: modelId,
+      })
+      this._modelId = modelId
+      const updated = findModelConfigOption(result?.configOptions)?.currentValue
+      if (typeof updated === 'string') this._modelId = updated
+    } catch (error) {
+      this._modelSetError = error
+    }
   }
 
   /**

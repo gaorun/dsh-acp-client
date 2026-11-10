@@ -1,8 +1,12 @@
 /**
- * Host 半：ACP LLM adapter（M2）。
+ * Host 半：ACP LLM adapter。
  *
  * 契约见 docs/design.md §1.1 与 @deepseek-ai/dsh-llm 的 LlmAdapter。
  * 一个已安装 ACP Agent = 一条 provider 路由；stream 走 ACP v1 会话驱动（有状态桥）。
+ *
+ * 模型列表来自 ACP `session/new` 的 `models.availableModels`（或 configOptions 的 model
+ * select）：`listModels` 首次调用会起一个短命 probe 会话读取并缓存；`stream` 按 DSH 选中的
+ * model id 调 `session/set_config_option` 切换外部 Agent 的模型。
  */
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import { createMapperState, mapUpdate, stopReasonToFinish } from './v1-mapping.mjs'
@@ -27,6 +31,9 @@ export function extractLastUserText(messages) {
   return ''
 }
 
+/** 探测模型列表的超时（毫秒），避免 listModels 卡死 GUI。 */
+const PROBE_TIMEOUT_MS = 15000
+
 /**
  * 把一个已安装 agent 定义挂成一条 provider 路由的 adapter。
  * @param {object} agent 已安装 agent 定义（含 id/name/protocolVersion/distribution）
@@ -40,19 +47,64 @@ export class AcpAdapter extends LlmAdapter {
     this.provider = providerIdFor(agent.id)
     /** @type {Map<string, V1Session>} sessionId → 已建 ACP 会话 */
     this.sessions = new Map()
+    /** @type {Array<object>|undefined} 缓存的模型目录 */
+    this._models = undefined
+    /** @type {Promise<Array<object>>|undefined} 进行中的探测 */
+    this._probe = undefined
   }
 
   providerInfo() {
     return { id: this.provider, name: this.agent.name }
   }
 
-  /** 模型列表：v1 暂返回单一「primary」；后续从 initialize/session.new 的 availableModes 读取。 */
+  /**
+   * 模型列表：首次探测外部 Agent 的 session/new.models 并缓存；
+   * 探测失败则回退单一 `primary`，保证下拉框始终有可选项。
+   */
   async listModels() {
+    if (this._models !== undefined) return this._models
+    if (this._probe === undefined) this._probe = this.probeModels()
+    try {
+      this._models = await this._probe
+      return this._models
+    } finally {
+      this._probe = undefined
+    }
+  }
+
+  /** 起一个短命 ACP 会话读取模型列表，读完即关。 */
+  async probeModels() {
+    let probe
+    try {
+      probe = await Promise.race([
+        V1Session.open(this.agent, { cwd: this.resolveCwd({}) }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('model probe timed out')), PROBE_TIMEOUT_MS)),
+      ])
+      const models = probe.models
+      if (models.length > 0) {
+        return models.map((model) => ({
+          provider: this.provider,
+          id: model.id,
+          name: model.name,
+          ...(model.description ? { description: model.description } : {}),
+        }))
+      }
+    } catch {
+      // 探测失败（未登录 / 不支持 / 超时）：回退。
+    } finally {
+      if (probe !== undefined) await probe.close().catch(() => {})
+    }
     return [{ provider: this.provider, id: 'primary', name: this.agent.name }]
   }
 
   async resolveModel(_provider, model) {
-    return { provider: this.provider, id: model, name: this.agent.name }
+    const entry = this._models?.find((item) => item.id === model)
+    return {
+      provider: this.provider,
+      id: model,
+      name: entry?.name ?? (model === 'primary' ? this.agent.name : model),
+      ...(entry?.description ? { description: entry.description } : {}),
+    }
   }
 
   /** 解析当前 DSH session 的工作目录，供 ACP session/new 的 cwd。 */
@@ -88,6 +140,11 @@ export class AcpAdapter extends LlmAdapter {
       }
     }
 
+    // 按 DSH 选中的模型切换外部 Agent 的模型（best-effort，失败不阻断回合）。
+    if (options?.model && options.model !== 'primary') {
+      await session.setModel(options.model)
+    }
+
     const onAbort = () => session.cancel()
     signal?.addEventListener('abort', onAbort)
 
@@ -113,6 +170,7 @@ export class AcpAdapter extends LlmAdapter {
   async dispose() {
     const sessions = [...this.sessions.values()]
     this.sessions.clear()
+    this._models = undefined
     await Promise.allSettled(sessions.map((session) => session.close()))
   }
 }
