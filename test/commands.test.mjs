@@ -132,3 +132,12 @@ test('commands: colon-named ACP command registers under a DSH name but sends the
   assert.equal(result.kind, 'success')
   assert.deepEqual(followed[0].content, [{ type: 'text', text: '/opsx:apply change-1' }])
 })
+
+test('commands: rewritten names surface the original in the description', () => {
+  const adapter = new AcpAdapter(agentDef, undefined)
+  const { agent, registered } = makeFakeAgent()
+  adapter.registerCommands(agent, [{ name: 'opsx:apply', description: 'Apply a change' }])
+  assert.equal(registered[0].name, 'opsx-apply')
+  assert.match(registered[0].description, /opsx:apply/)
+  assert.match(registered[0].description, /Apply a change/)
+})

@@ -384,10 +384,14 @@ export class AcpAdapter extends LlmAdapter {
       // DSH 命令名只允许 ^[a-z][a-z0-9_-]*$；ACP 名字可能含 `:` / 大写（如 opsx:apply），
       // 用 DSH 合法名注册，执行时仍发回原始名字。
       const name = sanitizeCommandName(rawName)
+      // 名字被改写时，把原始名放进描述，菜单里仍能看到 `opsx:apply`。
+      const description = rawName === name
+        ? (command.description ?? `Run /${rawName} on ${this.agent.name}`)
+        : `${rawName}${command.description ? ` · ${command.description}` : ''}`
       try {
         disposers.push(commandService.register({
           name,
-          description: command.description ?? `Run /${rawName} on ${this.agent.name}`,
+          description,
           ...(command.input?.hint ? { input: { hint: command.input.hint } } : {}),
           handler: ({ agent, rawInput }) => this.runAgentCommand(agent, rawName, rawInput),
         }))
