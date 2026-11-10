@@ -23,7 +23,7 @@ function fakeSetup(options = {}) {
   return { adapter: new AcpAdapter(agentDef, ctx), dshAgent, appended }
 }
 
-test('tool events: appends tool/call then tool/result with the OPEN turn/step', async () => {
+test('tool events: advertises the call, then appends tool/call and tool/result', async () => {
   const { adapter, dshAgent, appended } = fakeSetup({ step: 1 })
   const started = await adapter.appendToolEvent(dshAgent, {
     sessionUpdate: 'tool_call',
@@ -32,10 +32,24 @@ test('tool events: appends tool/call then tool/result with the OPEN turn/step', 
     rawInput: { path: '/a' },
   })
   assert.equal(started, true)
-  assert.equal(appended[0].type, 'tool/call')
+  // 会话格式要求 tool/call 前必须有一条 assistant/message 声明同一个 tool-call block。
+  assert.equal(appended[0].type, 'assistant/message')
+  assert.equal(appended[0].opts.surfaceOp, 'append')
   assert.equal(appended[0].data.turn, 3)
   assert.equal(appended[0].data.step, 1)
-  assert.equal(appended[0].data.callId, 'c1')
+  const advertised = appended[0].data.message.content[0]
+  assert.equal(advertised.type, 'tool-call')
+  assert.equal(advertised.id, 'c1')
+  assert.equal(advertised.name, 'Read')
+  assert.equal(advertised.arguments, '{"path":"/a"}')
+
+  assert.equal(appended[1].type, 'tool/call')
+  assert.equal(appended[1].data.turn, 3)
+  assert.equal(appended[1].data.step, 1)
+  assert.equal(appended[1].data.callId, 'c1')
+  // 声明与调用必须逐字一致，否则重放时判为 corrupt。
+  assert.equal(appended[1].data.name, advertised.name)
+  assert.equal(appended[1].data.arguments, advertised.arguments)
 
   const finished = await adapter.appendToolEvent(dshAgent, {
     sessionUpdate: 'tool_call_update',
@@ -44,13 +58,13 @@ test('tool events: appends tool/call then tool/result with the OPEN turn/step', 
     content: [{ type: 'content', content: { type: 'text', text: 'ok' } }],
   })
   assert.equal(finished, true)
-  assert.equal(appended[1].type, 'tool/result')
-  assert.equal(appended[1].data.turn, 3)
-  assert.equal(appended[1].data.step, 1)
-  assert.equal(appended[1].data.message.role, 'tool')
-  assert.deepEqual(appended[1].data.message.content, [{ type: 'text', text: 'ok' }])
-  assert.equal(appended[1].opts.surfaceOp, 'append')
-  assert.deepEqual(appended[1].opts.sourceEventSeqs, [0])
+  assert.equal(appended[2].type, 'tool/result')
+  assert.equal(appended[2].data.turn, 3)
+  assert.equal(appended[2].data.step, 1)
+  assert.equal(appended[2].data.message.role, 'tool')
+  assert.deepEqual(appended[2].data.message.content, [{ type: 'text', text: 'ok' }])
+  assert.equal(appended[2].opts.surfaceOp, 'append')
+  assert.deepEqual(appended[2].opts.sourceEventSeqs, [1])
 })
 
 test('tool events: failed status maps to isError', async () => {
@@ -62,14 +76,26 @@ test('tool events: failed status maps to isError', async () => {
     status: 'failed',
     rawOutput: { error: 'boom' },
   })
-  assert.equal(appended[1].data.message.isError, true)
+  assert.equal(appended[2].data.message.isError, true)
 })
 
 test('tool events: non-terminal update appends no result', async () => {
   const { adapter, dshAgent, appended } = fakeSetup()
   await adapter.appendToolEvent(dshAgent, { sessionUpdate: 'tool_call', toolCallId: 'c3', title: 'Read' })
   await adapter.appendToolEvent(dshAgent, { sessionUpdate: 'tool_call_update', toolCallId: 'c3', status: 'in_progress' })
-  assert.equal(appended.length, 1)
+  assert.equal(appended.length, 2)
+})
+
+test('tool events: resolves started calls before the step closes', async () => {
+  const { adapter, dshAgent, appended } = fakeSetup()
+  await adapter.appendToolEvent(dshAgent, { sessionUpdate: 'tool_call', toolCallId: 'c4', title: 'Read' })
+  adapter.resolvePendingTools(dshAgent)
+  assert.equal(appended[2].type, 'tool/result')
+  assert.equal(appended[2].data.message.isError, true)
+  assert.deepEqual(appended[2].opts.sourceEventSeqs, [1])
+  // 已收尾的调用不会在后续回合重复补结果。
+  adapter.resolvePendingTools(dshAgent)
+  assert.equal(appended.length, 3)
 })
 
 test('tool events: refuses to append when the open turn/step cannot be determined', async () => {

@@ -8,7 +8,7 @@
  * select）：`listModels` 首次调用会起一个短命 probe 会话读取并缓存；`stream` 按 DSH 选中的
  * model id 调 `session/set_config_option` 切换外部 Agent 的模型。
  */
-import { LlmAdapter, createToolResultMessage } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, createAssistantMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
 import { createMapperState, mapUpdate, stopReasonToFinish } from './v1-mapping.mjs'
 import { V1Session } from './v1-session.mjs'
 
@@ -267,11 +267,12 @@ export class AcpAdapter extends LlmAdapter {
 
   /**
    * 把一条 ACP 工具活动补成 DSH 会话事件，使其在轨迹里显示为原生工具卡片：
-   *  - 首次 → 追加 `tool/call`（log-only 事件）
+   *  - 首次 → 先追加声明该调用的 `assistant/message`，再追加 `tool/call`
    *  - completed/failed → 追加 `tool/result`（surface 事件，带 surfaceOp: 'append'）
+   * @param {{provider?: string, model?: string}} [source] 声明消息的来源（provider/model）
    * @returns {Promise<boolean>} 是否已按事件处理（false 时调用方回退到思考轨迹文本）
    */
-  async appendToolEvent(dshAgent, update) {
+  async appendToolEvent(dshAgent, update, source) {
     const session = dshAgent?.session
     if (session?.append === undefined) return false
     const callId = update?.toolCallId ?? update?.id
@@ -281,16 +282,22 @@ export class AcpAdapter extends LlmAdapter {
     const position = this.toolPosition(session)
     if (position === undefined) return false
     const { turn, step } = position
+    // tool/call 必须与某条 assistant/message 里声明的 tool-call block 完全一致
+    // （id/name/arguments）。两者用同一组字符串构造，保证重放校验能配上。
+    const name = update.title ?? update.kind ?? 'tool'
+    const args = safeJson(update.rawInput ?? {})
     try {
       let record = this._toolCalls.get(callId)
       if (record === undefined) {
-        const event = session.append('tool/call', {
+        session.append('assistant/message', {
           turn,
           step,
-          callId,
-          name: update.title ?? update.kind ?? 'tool',
-          arguments: safeJson(update.rawInput ?? {}),
-        })
+          message: createAssistantMessage({
+            content: [{ type: 'tool-call', id: callId, name, arguments: args }],
+            source: { provider: source?.provider ?? this.provider, model: source?.model ?? 'primary' },
+          }),
+        }, { surfaceOp: 'append' })
+        const event = session.append('tool/call', { turn, step, callId, name, arguments: args })
         record = { seq: event.seq, turn, step }
         this._toolCalls.set(callId, record)
       }
@@ -311,6 +318,31 @@ export class AcpAdapter extends LlmAdapter {
       // 会话不是可追加状态 / 事件形状被拒：若已补上 tool/call 就避免与思考轨迹重复，
       // 否则回退到思考轨迹文本，不阻断回合。
       return this._toolCalls.has(callId)
+    }
+  }
+
+  /**
+   * 回合结束时收尾仍无结果的工具调用：声明过却没配对的 tool/call 会让
+   * step/end 因 unresolved tool call 判为 corrupt，这里补一条失败的 tool/result。
+   */
+  resolvePendingTools(dshAgent) {
+    const session = dshAgent?.session
+    if (session?.append === undefined) return
+    for (const [callId, record] of [...this._toolCalls]) {
+      try {
+        session.append('tool/result', {
+          turn: record.turn,
+          step: record.step,
+          message: createToolResultMessage({
+            callId,
+            content: [{ type: 'text', text: 'ACP agent did not report a result before the turn ended.' }],
+            isError: true,
+          }),
+        }, { surfaceOp: 'append', sourceEventSeqs: [record.seq] })
+      } catch {
+        // 会话已不可追加时放弃；不阻断回合收尾。
+      }
+      this._toolCalls.delete(callId)
     }
   }
 
@@ -378,7 +410,7 @@ export class AcpAdapter extends LlmAdapter {
         }
         // 工具活动优先补成会话事件（原生工具卡片）；失败则退回思考轨迹文本。
         const isTool = update?.sessionUpdate === 'tool_call' || update?.sessionUpdate === 'tool_call_update'
-        if (isTool && (await this.appendToolEvent(dshAgent, update))) continue
+        if (isTool && (await this.appendToolEvent(dshAgent, update, { provider: options?.provider, model: options?.model }))) continue
         for (const chunk of mapUpdate(update, state)) yield chunk
       }
       if (signal?.aborted) {
@@ -389,6 +421,7 @@ export class AcpAdapter extends LlmAdapter {
     } catch (error) {
       yield { type: 'finish', reason: { kind: 'error', failure: { code: 'TRANSPORT', message: error?.message ?? String(error) } } }
     } finally {
+      this.resolvePendingTools(dshAgent)
       signal?.removeEventListener('abort', onAbort)
     }
   }
