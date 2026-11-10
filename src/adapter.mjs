@@ -78,6 +78,28 @@ export function sanitizeCommandName(raw) {
   return name.length > 64 ? name.slice(0, 64).replace(/-+$/g, '') : name
 }
 
+/** 最后一条 user 消息的下标（无则 -1）。 */
+export function lastUserIndex(messages) {
+  for (let i = messages.length - 1; i >= 0; i -= 1) if (messages[i]?.role === 'user') return i
+  return -1
+}
+
+/** 把历史里的 user/assistant 文本渲染成上下文块。 */
+export function renderHistory(messages) {
+  const lines = []
+  for (const message of messages) {
+    if (message?.role !== 'user' && message?.role !== 'assistant') continue
+    const text = (message.content ?? [])
+      .filter((block) => block?.type === 'text' && typeof block.text === 'string')
+      .map((block) => block.text)
+      .join('\n')
+      .trim()
+    if (text.length === 0) continue
+    lines.push(`${message.role === 'user' ? 'User' : 'Assistant'}: ${text}`)
+  }
+  return lines.join('\n\n')
+}
+
 /**
  * 把一个已安装 agent 定义挂成一条 provider 路由的 adapter。
  * @param {object} agent 已安装 agent 定义（含 id/name/protocolVersion/distribution）
@@ -209,6 +231,25 @@ export class AcpAdapter extends LlmAdapter {
   }
 
   /**
+   * 构造本轮发给外部 Agent 的 prompt。
+   * 新会话（fresh=true）额外带上 DSH 会话此前的 user/assistant 文本作上下文，
+   * 使切换模型或 DSH 重启后外部 Agent 仍知道之前聊过什么；既有会话只发新消息。
+   */
+  async buildPrompt(options, fresh, signal) {
+    const messages = options?.messages ?? []
+    const content = await this.extractLastUserContent(messages, signal)
+    if (!fresh) return content
+    const index = lastUserIndex(messages)
+    if (index < 0) return content
+    const history = renderHistory(messages.slice(0, index))
+    if (history.length === 0) return content
+    return [
+      { type: 'text', text: `以下是本次对话此前的上下文，请据此理解接下来的消息：\n\n${history}\n\n---\n\n` },
+      ...content,
+    ]
+  }
+
+  /**
    * 把一条 ACP 工具活动补成 DSH 会话事件，使其在轨迹里显示为原生工具卡片：
    *  - 首次 → 追加 `tool/call`（log-only 事件）
    *  - completed/failed → 追加 `tool/result`（surface 事件，带 surfaceOp: 'append'）
@@ -267,10 +308,10 @@ export class AcpAdapter extends LlmAdapter {
   async *stream(options) {
     const signal = options?.signal
     const sessionId = String(options?.sessionId ?? 'default')
-    const userContent = await this.extractLastUserContent(options?.messages ?? [], signal)
 
     let session = this.sessions.get(sessionId)
-    if (session === undefined) {
+    const fresh = session === undefined
+    if (fresh) {
       try {
         session = await V1Session.open(this.agent, { cwd: this.resolveCwd(options) })
         this.sessions.set(sessionId, session)
@@ -279,6 +320,10 @@ export class AcpAdapter extends LlmAdapter {
         return
       }
     }
+
+    // 新 ACP 会话没有历史：把 DSH 会话此前的 user/assistant 文本作为上下文一起发送，
+    // 这样切换模型 / DSH 重启后外部 Agent 仍知道之前聊过什么；既有会话只发新消息。
+    const userContent = await this.buildPrompt(options, fresh, signal)
 
     // 按 DSH 选中的模型切换外部 Agent 的模型（best-effort，失败不阻断回合）。
     if (options?.model && options.model !== 'primary') {
