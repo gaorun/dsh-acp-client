@@ -8,7 +8,7 @@
  * select）：`listModels` 首次调用会起一个短命 probe 会话读取并缓存；`stream` 按 DSH 选中的
  * model id 调 `session/set_config_option` 切换外部 Agent 的模型。
  */
-import { LlmAdapter } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, createToolResultMessage } from '@deepseek-ai/dsh-llm'
 import { createMapperState, mapUpdate, stopReasonToFinish } from './v1-mapping.mjs'
 import { V1Session } from './v1-session.mjs'
 
@@ -34,6 +34,35 @@ export function extractLastUserText(messages) {
 /** 探测模型列表的超时（毫秒），避免 listModels 卡死 GUI。 */
 const PROBE_TIMEOUT_MS = 15000
 
+/** 安全地把任意值渲染成 JSON 字符串（截断）。 */
+function safeJson(value) {
+  try {
+    const text = JSON.stringify(value ?? {})
+    return typeof text === 'string' ? text : '{}'
+  } catch {
+    return '{}'
+  }
+}
+
+/** 把 ACP tool_call_update 的内容转成 DSH tool-result 的 ContentBlock[]。 */
+function toolResultContent(update) {
+  const blocks = []
+  if (Array.isArray(update.content)) {
+    for (const item of update.content) {
+      if (item?.type === 'content' && item.content?.type === 'text') {
+        blocks.push({ type: 'text', text: item.content.text })
+      } else if (item?.type === 'diff') {
+        blocks.push({ type: 'text', text: `diff ${item.path ?? ''}${typeof item.newText === 'string' ? `\n${item.newText}` : ''}` })
+      } else if (item?.type === 'terminal') {
+        blocks.push({ type: 'text', text: `terminal: ${item.terminalId ?? ''}` })
+      }
+    }
+  }
+  if (blocks.length === 0 && update.rawOutput !== undefined) blocks.push({ type: 'text', text: safeJson(update.rawOutput) })
+  if (blocks.length === 0) blocks.push({ type: 'text', text: `${update.title ?? 'tool'} ${update.status ?? ''}`.trim() })
+  return blocks
+}
+
 /**
  * 把一个已安装 agent 定义挂成一条 provider 路由的 adapter。
  * @param {object} agent 已安装 agent 定义（含 id/name/protocolVersion/distribution）
@@ -53,6 +82,8 @@ export class AcpAdapter extends LlmAdapter {
     this._probe = undefined
     /** @type {Map<string, {key:string, disposers:Array<() => void>}>} DSH agent → 已注册的 ACP 斜杠命令 */
     this._commandState = new Map()
+    /** @type {Map<string, {seq:number}>} ACP toolCallId → 已追加的 tool/call 事件 */
+    this._toolCalls = new Map()
   }
 
   providerInfo() {
@@ -162,6 +193,61 @@ export class AcpAdapter extends LlmAdapter {
     }
   }
 
+  /**
+   * 把一条 ACP 工具活动补成 DSH 会话事件，使其在轨迹里显示为原生工具卡片：
+   *  - 首次 → 追加 `tool/call`（log-only 事件）
+   *  - completed/failed → 追加 `tool/result`（surface 事件，带 surfaceOp: 'append'）
+   * @returns {Promise<boolean>} 是否已按事件处理（false 时调用方回退到思考轨迹文本）
+   */
+  async appendToolEvent(dshAgent, update) {
+    const session = dshAgent?.session
+    if (session?.append === undefined) return false
+    const callId = update?.toolCallId ?? update?.id
+    if (typeof callId !== 'string' || callId.length === 0) return false
+    try {
+      const turn = this.currentTurn(session)
+      let record = this._toolCalls.get(callId)
+      if (record === undefined) {
+        const event = session.append('tool/call', {
+          turn,
+          step: 0,
+          callId,
+          name: update.title ?? update.kind ?? 'tool',
+          arguments: safeJson(update.rawInput ?? {}),
+        })
+        record = { seq: event.seq }
+        this._toolCalls.set(callId, record)
+      }
+      if (update.status === 'completed' || update.status === 'failed') {
+        session.append('tool/result', {
+          turn,
+          step: 0,
+          message: createToolResultMessage({
+            callId,
+            content: toolResultContent(update),
+            isError: update.status === 'failed',
+          }),
+        }, { surfaceOp: 'append', sourceEventSeqs: [record.seq] })
+        this._toolCalls.delete(callId)
+      }
+      return true
+    } catch {
+      // 会话不是可追加状态 / 事件形状被拒：若已补上 tool/call 就避免与思考轨迹重复，
+      // 否则回退到思考轨迹文本，不阻断回合。
+      return this._toolCalls.has(callId)
+    }
+  }
+
+  /** 当前 turn（tool 事件的归属由事件 seq 决定，turn/step 仅作记录）。 */
+  currentTurn(session) {
+    try {
+      const boundary = this.ctx?.get('agents')?.turnBoundaryOf?.(session)
+      return typeof boundary?.lastTurn === 'number' ? boundary.lastTurn : 0
+    } catch {
+      return 0
+    }
+  }
+
   /** 把一次 DSH 模型调用映射为一次 ACP 回合（v1）。 */
   async *stream(options) {
     const signal = options?.signal
@@ -195,6 +281,9 @@ export class AcpAdapter extends LlmAdapter {
         if (update?.sessionUpdate === 'available_commands_update') {
           this.registerCommands(dshAgent, update.availableCommands ?? [])
         }
+        // 工具活动优先补成会话事件（原生工具卡片）；失败则退回思考轨迹文本。
+        const isTool = update?.sessionUpdate === 'tool_call' || update?.sessionUpdate === 'tool_call_update'
+        if (isTool && (await this.appendToolEvent(dshAgent, update))) continue
         for (const chunk of mapUpdate(update, state)) yield chunk
       }
       if (signal?.aborted) {
