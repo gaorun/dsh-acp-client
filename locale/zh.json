@@ -2,6 +2,5 @@
   "meta": {
     "title": "ACP Registry",
     "description": "发现并安装 ACP Agent，把它们当模型使用。"
-  },
-  "nav": "ACP Registry"
+  }
 }
