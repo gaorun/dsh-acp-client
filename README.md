@@ -47,7 +47,9 @@ node --test          # 19/19 通过（mapping / launch / registry / v1-session �
 - **接入点**：LLM adapter（`ctx.llm.registerAdapter`），provider 命名 `acp:<id>`。
 - **有状态桥**：DSH 的 `stream(messages)` 是无状态单次调用，而 ACP Agent 是整回合有状态；adapter 用 `options.sessionId → ACP 会话` 的 Map 桥接，只把「本轮新增用户文本」发成 `session/prompt`。
 - **语义映射**：`agent_message_chunk→text-delta`、`agent_thought_chunk→reasoning-delta`、`tool_call→reasoning`（v1 降级）、`usage_update→usage`、`stopReason→finish`。
-- **模型选择**：`listModels` 首次起一个短命 probe 会话读取 ACP `session/new.models.availableModels`（或 configOptions 的 model select）并缓存；`stream` 按 DSH 选中的 model id 调 `session/set_config_option` 切换外部 Agent 模型。已验证 Qoder CLI 返回 15 个模型。
+- **模型选择**：`listModels` 首次起一个短命 probe 会话读取 ACP `session/new.models.availableModels`（或 configOptions 的 model select）并缓存；模型显示名带上 Agent 前缀（`Qoder:DeepSeek-V4-Flash`）；`stream` 按 DSH 选中的 model id 调 `session/set_config_option` 切换外部 Agent 模型。已验证 Qoder CLI 返回 15 个模型。
+- **思考等级**：把 ACP configOption `category=thought_level`（如 `reasoning_effort`）映射成 DSH 的 `reasoning.efforts`，模型下拉框出现思考等级；`stream` 按选中的 effort 调 `session/set_config_option` 切换。已验证 Qoder 的 `high/max/low/none`。
+- **权限等级**：注册 agent 作用域的 `/acp-mode [mode]` 命令，列出/切换 ACP configOption `category=mode`（Qoder 的 `default/acceptEdits/auto/dontAsk/yolo`）。
 - **斜杠命令**：`stream` 捕获 ACP `available_commands_update`，把外部 Agent 的命令注册成**该 DSH agent 作用域**的 `commands`（`agent.ctx.commands.register`，只对该 agent 的输入框可见）；执行时把 `/name args` 作为下一条用户消息投给 agent（`agent.followup`），由 agent-loop 转成 `session/prompt` 交给外部 Agent。已验证 Qoder CLI 广告 `/goal` 等命令。
 - **V1/V2**：`protocolVersion` 字段切换 `v1-session` / `v2-session`，上层（registry 页/下拉/轨迹/统计）不动。
 - **数据源澄清**：用户给的 `agent.schema.json` 是校验 manifest 的 JSON Schema；真正的列表是聚合的 `registry.json`（CDN `https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json`）。

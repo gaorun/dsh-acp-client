@@ -27,6 +27,24 @@ export function findModelConfigOption(configOptions) {
   return configOptions.find((option) => option?.category === 'model') ?? configOptions.find((option) => option?.id === 'model')
 }
 
+/** 从 configOptions 里找某 category 的选择器（category 优先，其次 id）。 */
+export function findConfigOption(configOptions, category, fallbackId) {
+  if (!Array.isArray(configOptions)) return undefined
+  return (
+    configOptions.find((option) => option?.category === category) ??
+    configOptions.find((option) => option?.id === (fallbackId ?? category))
+  )
+}
+
+/** 把 ACP select 选项映射成 `{id, name, description?}`。 */
+function selectEntries(options) {
+  return (options ?? []).map((value) => ({
+    id: value.value,
+    name: value.name ?? value.value,
+    ...(value.description ? { description: value.description } : {}),
+  }))
+}
+
 export class V1Session {
   /**
    * @param {object} init
@@ -141,6 +159,72 @@ export class V1Session {
       if (typeof updated === 'string') this._modelId = updated
     } catch (error) {
       this._modelSetError = error
+    }
+  }
+
+  /** 思考等级选择器（category=thought_level）。无则 undefined。 */
+  get reasoning() {
+    const option = findConfigOption(this.session.newSessionResponse?.configOptions, 'thought_level', 'reasoning_effort')
+    if (option === undefined) return undefined
+    const efforts = selectEntries(option.options)
+    if (efforts.length === 0) return undefined
+    return {
+      configId: option.id,
+      efforts,
+      current: this._reasoningEffort ?? option.currentValue,
+    }
+  }
+
+  /** 设置思考等级：v1 `session/set_config_option`（configId 取 thought_level 选项 id）。 */
+  async setReasoningEffort(effortId) {
+    const reasoning = this.reasoning
+    if (reasoning === undefined || !effortId || effortId === reasoning.current) return
+    try {
+      await this.connection.agent.request(acp.methods.agent.session.setConfigOption, {
+        sessionId: this.sessionId,
+        configId: reasoning.configId,
+        value: effortId,
+      })
+      this._reasoningEffort = effortId
+    } catch (error) {
+      this._reasoningSetError = error
+    }
+  }
+
+  /** 权限/会话模式（category=mode 或 classic modes）。 */
+  get modes() {
+    const response = this.session.newSessionResponse
+    const classic = response?.modes?.availableModes
+    if (Array.isArray(classic) && classic.length > 0) {
+      return classic.map((mode) => ({
+        id: mode.id,
+        name: mode.name ?? mode.id,
+        ...(mode.description ? { description: mode.description } : {}),
+      }))
+    }
+    return selectEntries(findConfigOption(response?.configOptions, 'mode', 'mode')?.options)
+  }
+
+  /** 当前权限/会话模式 id。 */
+  get currentModeId() {
+    if (this._modeId !== undefined) return this._modeId
+    const response = this.session.newSessionResponse
+    return response?.modes?.currentModeId ?? findConfigOption(response?.configOptions, 'mode', 'mode')?.currentValue
+  }
+
+  /** 设置权限/会话模式。 */
+  async setMode(modeId) {
+    if (!modeId || modeId === this.currentModeId) return
+    const option = findConfigOption(this.session.newSessionResponse?.configOptions, 'mode', 'mode')
+    try {
+      await this.connection.agent.request(acp.methods.agent.session.setConfigOption, {
+        sessionId: this.sessionId,
+        configId: option?.id ?? 'mode',
+        value: modeId,
+      })
+      this._modeId = modeId
+    } catch (error) {
+      this._modeSetError = error
     }
   }
 

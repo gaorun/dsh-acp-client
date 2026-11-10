@@ -121,6 +121,10 @@ export class AcpAdapter extends LlmAdapter {
     this._commandState = new Map()
     /** @type {Map<string, {seq:number}>} ACP toolCallId → 已追加的 tool/call 事件 */
     this._toolCalls = new Map()
+    /** @type {{configId:string, efforts:Array<object>, current?:string}|undefined} 缓存的思考等级 */
+    this._reasoning = undefined
+    /** @type {Map<object, () => void>} DSH agent 作用域 → /acp-mode 命令 disposer */
+    this._modeCommands = new Map()
   }
 
   providerInfo() {
@@ -152,10 +156,13 @@ export class AcpAdapter extends LlmAdapter {
       ])
       const models = probe.models
       if (models.length > 0) {
+        // 模型名带上外部 Agent 名（如 Qoder:DeepSeek-V4-Flash）；同时缓存思考等级。
+        const reasoning = probe.reasoning
+        this._reasoning = reasoning
         return models.map((model) => ({
           provider: this.provider,
           id: model.id,
-          name: model.name,
+          name: `${this.agent.name}:${model.name}`,
           ...(model.description ? { description: model.description } : {}),
         }))
       }
@@ -169,11 +176,20 @@ export class AcpAdapter extends LlmAdapter {
 
   async resolveModel(_provider, model) {
     const entry = this._models?.find((item) => item.id === model)
+    const reasoning = this._reasoning
     return {
       provider: this.provider,
       id: model,
       name: entry?.name ?? (model === 'primary' ? this.agent.name : model),
       ...(entry?.description ? { description: entry.description } : {}),
+      ...(reasoning !== undefined && model !== 'primary'
+        ? {
+            reasoning: {
+              efforts: reasoning.efforts,
+              ...(reasoning.current ? { defaultEffort: reasoning.current } : {}),
+            },
+          }
+        : {}),
     }
   }
 
@@ -322,6 +338,7 @@ export class AcpAdapter extends LlmAdapter {
   async *stream(options) {
     const signal = options?.signal
     const sessionId = String(options?.sessionId ?? 'default')
+    const dshAgent = this.ctx?.get('agents')?.get(options?.sessionId)
 
     let session = this.sessions.get(sessionId)
     const fresh = session === undefined
@@ -329,6 +346,7 @@ export class AcpAdapter extends LlmAdapter {
       try {
         session = await V1Session.open(this.agent, { cwd: this.resolveCwd(options) })
         this.sessions.set(sessionId, session)
+        this.registerModeCommand(dshAgent)
       } catch (error) {
         yield { type: 'finish', reason: { kind: 'error', failure: { code: 'TRANSPORT', message: error?.message ?? String(error) } } }
         return
@@ -343,12 +361,15 @@ export class AcpAdapter extends LlmAdapter {
     if (options?.model && options.model !== 'primary') {
       await session.setModel(options.model)
     }
+    // 按 DSH 选中的思考等级切换外部 Agent 的 reasoning effort。
+    if (options?.reasoningEffort !== undefined) {
+      await session.setReasoningEffort(options.reasoningEffort)
+    }
 
     const onAbort = () => session.cancel()
     signal?.addEventListener('abort', onAbort)
 
     const state = createMapperState()
-    const dshAgent = this.ctx?.get('agents')?.get(options?.sessionId)
     try {
       for await (const update of session.prompt(userContent)) {
         if (signal?.aborted) break
@@ -431,13 +452,56 @@ export class AcpAdapter extends LlmAdapter {
     }
   }
 
+  /** 为接收命令的 DSH agent 注册 `/acp-mode`（切换外部 Agent 的权限等级）。 */
+  registerModeCommand(dshAgent) {
+    const scope = dshAgent?.ctx
+    if (scope === undefined) return
+    if (this._modeCommands.has(scope)) return
+    const commandService = typeof scope.get === 'function' ? scope.get('commands') : scope.commands
+    if (commandService === undefined) return
+    try {
+      const dispose = commandService.register({
+        name: 'acp-mode',
+        description: `切换 ${this.agent.name} 的权限等级（当前 ${
+          this.sessions.get(String(dshAgent?.session?.id ?? ''))?.currentModeId ?? 'unknown'
+        }）`,
+        input: { hint: '<mode>' },
+        handler: ({ agent, rawInput }) => this.runAgentModeCommand(agent, rawInput),
+      })
+      this._modeCommands.set(scope, dispose)
+    } catch {
+      // 与已有命令冲突时跳过；不阻断其余命令。
+    }
+  }
+
+  /** 执行 `/acp-mode [mode]`：列出或切换外部 Agent 的权限等级。 */
+  async runAgentModeCommand(agent, rawInput) {
+    const acp = this.sessions.get(String(agent?.session?.id ?? ''))
+    if (acp === undefined) return { kind: 'error', text: '请先在模型下拉框选择 ACP Agent' }
+    const modes = acp.modes
+    if (modes.length === 0) return { kind: 'error', text: `${this.agent.name} 未暴露权限等级` }
+    const mode = rawInput.trim()
+    const available = modes.map((entry) => entry.id).join(', ')
+    if (mode === '') {
+      return { kind: 'success', text: `当前权限等级 ${acp.currentModeId}（可选：${available}）` }
+    }
+    if (!modes.some((entry) => entry.id === mode)) {
+      return { kind: 'error', text: `未知权限等级 "${mode}"（可选：${available}）` }
+    }
+    await acp.setMode(mode)
+    return { kind: 'success', text: `权限等级已切到 ${mode}` }
+  }
+
   /** 关闭并清理本 adapter 持有的所有 ACP 会话与进程。 */
   async dispose() {
     for (const state of this._commandState.values()) for (const dispose of state.disposers) dispose()
     this._commandState.clear()
+    for (const dispose of this._modeCommands.values()) dispose()
+    this._modeCommands.clear()
     const sessions = [...this.sessions.values()]
     this.sessions.clear()
     this._models = undefined
+    this._reasoning = undefined
     await Promise.allSettled(sessions.map((session) => session.close()))
   }
 }
