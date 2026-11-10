@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Original icon: two nodes joined by a protocol link, currentColor for theme adaptation. -->
+  <rect x="1" y="3" width="4" height="4" rx="1" fill="currentColor"/>
+  <rect x="11" y="9" width="4" height="4" rx="1" fill="currentColor"/>
+  <path d="M5 5 L11 11" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+  <circle cx="5" cy="5" r="1.4" fill="currentColor" opacity="0.35"/>
+  <circle cx="11" cy="11" r="1.4" fill="currentColor" opacity="0.35"/>
+</svg>

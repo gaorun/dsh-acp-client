@@ -1,0 +1,9 @@
+# dsh-acp-client bundle: one Host plugin row + one Client module (discovered via dsh.client).
+# Host row registers the ACP LLM adapter; the browser half owns the ACP Registry settings page.
+
+- insert:
+    - id: acp-client
+      name: '@deepseek-ai/dsh-acp-client'
+      config:
+        protocolVersion: v1
+        agents: []
