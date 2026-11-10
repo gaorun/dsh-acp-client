@@ -181,7 +181,11 @@ export class AcpAdapter extends LlmAdapter {
    */
   registerCommands(dshAgent, commands) {
     const scope = dshAgent?.ctx
-    if (scope?.commands === undefined) return
+    if (scope === undefined) return
+    // ctx.get() 免 inject 读取服务，且返回的 traceable 实例会把 this.ctx 绑到 scope，
+    // 因此 register 落在该 agent 的作用域层。
+    const commandService = typeof scope.get === 'function' ? scope.get('commands') : scope.commands
+    if (commandService === undefined) return
     const key = JSON.stringify(commands)
     const previous = this._commandState.get(scope)
     if (previous?.key === key) return
@@ -192,7 +196,7 @@ export class AcpAdapter extends LlmAdapter {
       const name = command?.name
       if (typeof name !== 'string' || name.length === 0) continue
       try {
-        disposers.push(scope.commands.register({
+        disposers.push(commandService.register({
           name,
           description: command.description ?? `Run /${name} on ${this.agent.name}`,
           ...(command.input?.hint ? { input: { hint: command.input.hint } } : {}),

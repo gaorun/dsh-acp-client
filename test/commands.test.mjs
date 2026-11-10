@@ -9,14 +9,16 @@ const agentDef = { id: 'example', name: 'Example agent', protocolVersion: 'v1', 
 function makeFakeAgent() {
   const registered = []
   const followed = []
+  const commandsService = {
+    register: (definition) => {
+      registered.push(definition)
+      return () => {}
+    },
+  }
   const agent = {
     ctx: {
-      commands: {
-        register: (definition) => {
-          registered.push(definition)
-          return () => {}
-        },
-      },
+      get: (name) => (name === 'commands' ? commandsService : undefined),
+      commands: commandsService,
     },
     followup: (message) => {
       followed.push(message)
