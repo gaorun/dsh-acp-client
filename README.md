@@ -2,7 +2,7 @@
 
 让 DeepSeek Harness（DSH）作为 **ACP 客户端**，把外部 ACP Agent（Qoder、Claude Code、Gemini CLI 等）当作「模型」接入：在模型下拉框里选中 Agent 及其模型，对话 / 轨迹 / 统计与原生模型一致。
 
-> **状态：探索 + 设计 + 骨架已交付；核心纯函数已实现并通过单测；GUI 接入（Host adapter 落线 + 设置页）为设计态，尚未在 dsh 运行时内安装验证。**
+> **状态：M2 已交付并验证。** ACP v1 会话驱动（SDK 落线）+ LLM adapter + 有状态桥已实现；bundle 已装进当前 profile，Host 插件激活成功（`fiberPhase: active`）；核心 19 个测试通过，并对真实 ACP v1 Agent（Qoder CLI 1.1.85）端到端冒烟通过。**M3（ACP Registry 设置页 + 模型下拉框的 GUI 验证）仍是骨架，未做。**
 
 ## 结论
 
@@ -12,9 +12,9 @@ DSH 已有一条干净的 LLM adapter 抽象（`@deepseek-ai/dsh-llm`），模�
 
 | # | 需求 | 落地 | 状态 |
 |---|---|---|---|
-| 1 | ACP Registry 设置页（侧栏入口）+ 自定义 Agent | `lib/client.js`（`settings.section` slot）+ `src/registry.mjs` + config 持久化 | 设计态（M3） |
-| 2 | 模型下拉框选 Agent 及模型 | adapter `registerAdapter` + `listModels`（provider = `acp:<id>`） | 设计态（M2） |
-| 3 | 对话/轨迹/统计同模型 | 全走 `ctx.llm.stream`，免费继承 | 设计态（M2） |
+| 1 | ACP Registry 设置页（侧栏入口）+ 自定义 Agent | `lib/client.js`（`settings.section` slot）+ `src/registry.mjs` + config 持久化 | 骨架（M3） |
+| 2 | 模型下拉框选 Agent 及模型 | adapter `registerAdapter` + `listModels`（provider = `acp:<id>`） | 已实现（M2），GUI 未验证 |
+| 3 | 对话/轨迹/统计同模型 | 全走 `ctx.llm.stream`，免费继承 | 已实现（M2），GUI 未验证 |
 | 4 | V1 先、V2 可扩展 | `protocolVersion` 字段 + `v1-session` / `v2-session` 分离 | V1 设计态、V2 扩展点 |
 | 5 | my-repos 下新建 `dsh-acp-client` | 本仓库 | ✅ |
 
@@ -26,19 +26,21 @@ DSH 已有一条干净的 LLM adapter 抽象（`@deepseek-ai/dsh-llm`），模�
 | `src/v1-mapping.mjs` | ACP v1 `session/update` → DSH stream chunk 映射（纯函数） | ✅ 已测 |
 | `src/launch.mjs` | registry 分布（npx/uvx/binary/command）→ spawn 命令 | ✅ 已测 |
 | `src/registry.mjs` | registry.json 拉取 + manifest 校验/规范化 | ✅ 已测 |
-| `src/adapter.mjs` | `AcpAdapter extends LlmAdapter`（listModels/resolveModel/stream） | 骨架（M2） |
-| `src/v1-session.mjs` | ACP v1 会话驱动（SDK connectWith/buildSession）占位 | 骨架（M2） |
-| `lib/index.js` | Host 插件入口：注册 adapter + Config schema | 骨架（M2） |
+| `src/adapter.mjs` | `AcpAdapter extends LlmAdapter`（listModels/resolveModel/stream + 有状态桥） | ✅ 已测（M2） |
+| `src/v1-session.mjs` | ACP v1 会话驱动（SDK client/connect/buildSession） | ✅ 已测（M2） |
+| `lib/index.js` | Host 插件入口：注册 adapter + Config schema + `inject:['llm']` | ✅ 已装已激活（M2） |
 | `lib/client.js` | 浏览器半：ACP Registry 设置页（`settings.section`） | 骨架（M3） |
-| `test/core.test.mjs` | 核心纯函数单测 | ✅ 13/13 |
+| `test/*.test.mjs` | 单测 + 端到端（example agent / 取消 / 会话复用） | ✅ 19/19 |
 
 ## 验证
 
 ```bash
-node --test          # 13/13 通过（v1-mapping / launch / registry）
+node --test          # 19/19 通过（mapping / launch / registry / v1-session 端到端 / 取消 / adapter 会话复用）
 ```
 
-未验证（如实说明）：Host adapter 与设置页需经 `plugin_manager install_bundle` 装进 profile 并在 dsh 运行时内验证；本仓库未做 git init / 安装（见 AGENTS.md「未经确认不主动执行 Git 操作」）。
+- **真实 Agent 冒烟**：`src/v1-session.mjs` 驱动 Qoder CLI 1.1.85（`~/.local/bin/qodercli --acp`）→ `initialize` + `session/new` + `session/prompt` 成功，`stopReason=end_turn`。
+- **bundle 安装**：`plugin_manager install_bundle /Users/run/my-repos/dsh-acp-client` → `application: applied`，`list_plugins` 显示 `include:acp-client` `enabled:true` `fiberPhase:active`，Config schema 正常投影。
+- **未验证（如实说明）**：模型下拉框里出现 `acp:<agent>` 并完成一次 GUI 对话 —— 这需要先通过 M3 的 Registry 设置页写入一个 agent 配置；当前 config 默认为 `agents: []`，adapter 未注册任何 provider。此外已装 bundle 是链接式安装，`inject: ['llm']` 修复会在下一次 DSH 重启/插件重激活后生效。
 
 ## 关键设计决策（详见 design.md）
 
