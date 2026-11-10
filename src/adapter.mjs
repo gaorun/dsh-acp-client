@@ -125,11 +125,48 @@ export class AcpAdapter extends LlmAdapter {
     return workingDirectory?.defaultDirectory ?? process.cwd()
   }
 
+  /**
+   * 从 messages 末尾取最近一条 user 消息，转成 ACP 内容块：
+   * 文本原样；图片读附件字节后转 base64（ACP ImageContent）。
+   * @returns {Promise<Array<object>>} ACP prompt content blocks
+   */
+  async extractLastUserContent(messages, signal) {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i]
+      if (message?.role !== 'user') continue
+      const blocks = []
+      for (const block of message.content ?? []) {
+        if (block?.type === 'text' && typeof block.text === 'string') {
+          blocks.push({ type: 'text', text: block.text })
+          continue
+        }
+        if (block?.type === 'image' && block.offloaded !== true && block.attachment) {
+          const image = await this.toAcpImage(block.attachment, signal)
+          blocks.push(image ?? { type: 'text', text: '[image omitted: attachment store unavailable]' })
+        }
+      }
+      if (blocks.length > 0) return blocks
+    }
+    return []
+  }
+
+  /** DSH 图片引用 → ACP ImageContent（base64）。读不到时返回 undefined。 */
+  async toAcpImage(ref, signal) {
+    const attachments = this.ctx?.get('attachments')
+    if (attachments === undefined) return undefined
+    try {
+      const { data } = await attachments.readImage(ref, signal)
+      return { type: 'image', data: Buffer.from(data).toString('base64'), mimeType: ref.mediaType }
+    } catch {
+      return undefined
+    }
+  }
+
   /** 把一次 DSH 模型调用映射为一次 ACP 回合（v1）。 */
   async *stream(options) {
     const signal = options?.signal
     const sessionId = String(options?.sessionId ?? 'default')
-    const userText = extractLastUserText(options?.messages ?? [])
+    const userContent = await this.extractLastUserContent(options?.messages ?? [], signal)
 
     let session = this.sessions.get(sessionId)
     if (session === undefined) {
@@ -153,7 +190,7 @@ export class AcpAdapter extends LlmAdapter {
     const state = createMapperState()
     const dshAgent = this.ctx?.get('agents')?.get(options?.sessionId)
     try {
-      for await (const update of session.prompt(userText)) {
+      for await (const update of session.prompt(userContent)) {
         if (signal?.aborted) break
         if (update?.sessionUpdate === 'available_commands_update') {
           this.registerCommands(dshAgent, update.availableCommands ?? [])

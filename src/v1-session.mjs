@@ -146,11 +146,12 @@ export class V1Session {
 
   /**
    * 发一次 prompt，逐个 yield sessionUpdate payload（`update` 字段）；回合结束置 stopReason。
+   * `content` 可以是字符串或 ACP content blocks 数组（文本 + 图片）。
    * 若 Agent 崩溃 / 连接关闭，会 throw，由调用方映射为 finish(error)。
    */
-  async *prompt(text) {
+  async *prompt(content) {
     this.stopReason = undefined
-    this.session.prompt(text)
+    this.session.prompt(content)
     for (;;) {
       const message = await this.session.nextUpdate()
       if (message.kind === 'stop') {
