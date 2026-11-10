@@ -61,7 +61,7 @@ export class AcpAdapter extends LlmAdapter {
     const sessionId = options?.sessionId
     if (sessionId !== undefined && workingDirectory !== undefined) {
       try {
-        const agent = this.ctx.agents.get(sessionId)
+        const agent = this.ctx.get('agents')?.get(sessionId)
         const session = agent?.session
         if (session !== undefined) return workingDirectory.get(session)
       } catch {
